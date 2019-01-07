@@ -11,7 +11,7 @@ const NetLibCore = (function () {
 
         const BAD = 0;
 
-        const SERVER_PUSH = 10;
+        const SERVER_CLIPBOARD_PUSH = 10
         const SERVER_CONNECT_OK = 11;
         const SERVER_CLOSING = 12;
         const SERVER_RESPONSE_OK = 13;
@@ -79,16 +79,23 @@ const NetLibCore = (function () {
                     case SERVER_CLOSING:
                         serverClosing = true
                         break
+                    case SERVER_CLIPBOARD_PUSH:
+                        console.log("Clipboard: %s\n", data.Buffer);
+                        let x= document.createElement("p");
+                        x.setAttribute("class", "_test");
+                        x.textContent = data.Buffer;
+                        log.appendChild(x);
+                    break
                     default:
-                        if (msg.Type != SERVER_RESPONSE_BAD || msg.Type != SERVER_RESPONSE_OK) {
+                        if (msg.Type != SERVER_RESPONSE_BAD && msg.Type != SERVER_RESPONSE_OK) {
                             break
                         }
                         let codeName = ((msg.Type == SERVER_RESPONSE_OK) ? "OK": "BAD")
                         for (let i = 0; i < actions.length; i++) {
                             let a = actions[i];
                             if (a.Id == msg.Callback) {
-                                let time = Date.now() - a.Time;
-                                console.log("Server -> Response [%s] [%d] [%d]\n", codeName, a.Type, time);
+                                let time = Date.now() - a.time;
+                                console.log("Server -> Response [%s] [%d] [%d]ms\n", codeName, a.Type, time, time/1000);
                                 let ret = a.cb({ type: a.Type, id: a.Id, data: data });
                                 if (ret != -1) {
                                     actions.splice(i, 1);

@@ -3,6 +3,7 @@ package eventwindows
 import (
 	"fmt"
 	"syscall"
+	"time"
 
 	"unsafe"
 
@@ -12,46 +13,63 @@ import (
 )
 
 var (
-	moduser32              = windows.NewLazyDLL("user32.dll")
-	procPostThreadMessage  = moduser32.NewProc("PostThreadMessageA")
+	//functions in kernel32.dll
 	modkernel32            = windows.NewLazyDLL("kernel32.dll")
 	procGetCurrentThreadId = modkernel32.NewProc("GetCurrentThreadId")
+	procGlobalAlloc        = modkernel32.NewProc("GlobalAlloc")
+	procGlobalFree         = modkernel32.NewProc("GlobalFree")
+	procGlobalLock         = modkernel32.NewProc("GlobalLock")
+	procGlobalUnlock       = modkernel32.NewProc("GlobalUnlock")
+	lstrcpy                = modkernel32.NewProc("lstrcpyW")
 
-	user32               = windows.NewLazySystemDLL("user32.dll")
-	procSetWindowsHookEx = user32.NewProc("SetWindowsHookExW")
-	procSetWinEventHook  = user32.NewProc("SetWinEventHook")
+	//functions in user32
+	user32                = windows.NewLazySystemDLL("user32.dll")
+	procPostThreadMessage = user32.NewProc("PostThreadMessageA")
+	procSetWindowsHookEx  = user32.NewProc("SetWindowsHookExW")
+	procSetWinEventHook   = user32.NewProc("SetWinEventHook")
 
 	procLowLevelKeyboard    = user32.NewProc("LowLevelKeyboardProc")
 	procCallNextHookEx      = user32.NewProc("CallNextHookEx")
 	procUnhookWindowsHookEx = user32.NewProc("UnhookWindowsHookEx")
 
-	procGetMessage  = user32.NewProc("GetMessageW")
-	procPeekMessage = user32.NewProc("PeekMessage")
-
-	procQuitMessage      = user32.NewProc("PostQuitMessage")
+	procGetMessage       = user32.NewProc("GetMessageW")
+	procPeekMessage      = user32.NewProc("PeekMessage")
 	procTranslateMessage = user32.NewProc("TranslateMessage")
 	procDispatchMessage  = user32.NewProc("DispatchMessageW")
-	keyboardHook         HHOOK
+	procQuitMessage      = user32.NewProc("PostQuitMessage")
+
+	procGetClipboardData = user32.NewProc("GetClipboardData")
+	procOpenClipboard    = user32.NewProc("OpenClipboard")
+	procCloseClipboard   = user32.NewProc("CloseClipboard")
+
+	keyboardHook HHOOK
 )
 
+//https://docs.microsoft.com/en-us/windows/desktop/winprog/windows-data-types
 type (
 	HANDLE        uintptr
 	HINSTANCE     HANDLE
 	HHOOK         HANDLE
 	HMODULE       HANDLE
 	HWINEVENTHOOK HANDLE
-	DWORD         uint32
-	INT           int
-	WPARAM        uintptr
-	LPARAM        uintptr
-	LRESULT       uintptr
+	HICON         HANDLE
+	HCURSOR       HICON
 	HWND          HANDLE
-	UINT          uint32
-	BOOL          int32
-	ULONG_PTR     uintptr
-	LONG          int32
-	LPWSTR        *WCHAR
-	WCHAR         uint16
+	HBRUSH        HANDLE
+
+	INT       int
+	UINT      uint32
+	DWORD     uint32
+	WPARAM    uintptr
+	LPARAM    uintptr
+	LRESULT   uintptr
+	BOOL      int32
+	ULONG_PTR uintptr
+	LONG      int32
+	WCHAR     uint16
+	CHAR      uint8
+	LPWSTR    *WCHAR
+	LPCSTR    *CHAR //A pointer to a constant null-terminated string of 8-bit Windows (ANSI) characters.
 )
 
 const (
@@ -187,6 +205,20 @@ const (
 
 var keyboardTable [0xFB]int
 
+type WNDPROC func(string)
+type WNDCLASS struct {
+	style         UINT
+	lpfnWndProc   WNDPROC
+	cbClsExtra    int
+	cbWndExtra    int
+	hInstance     HINSTANCE
+	hIcon         HICON
+	hCursor       HCURSOR
+	hbrBackground HBRUSH
+	lpszMenuName  LPCSTR
+	lpszClassName LPCSTR
+}
+
 // http://msdn.microsoft.com/en-us/library/windows/desktop/dd162805.aspx
 type POINT struct {
 	X, Y int32
@@ -317,7 +349,59 @@ func LowLevelKeyboardProc(nCode int, wParam WPARAM, lParam LPARAM) LRESULT {
 	return LRESULT(ret)
 }
 
+func CreateWindow() {
+
+}
+func (s *SHook) KeyboardProcCallback(nCode int, wParam WPARAM, lParam LPARAM) LRESULT {
+	if nCode < 0 {
+		return CallNextHookEx(keyboardHook, nCode, wParam, lParam)
+	}
+	fmt.Printf("xd\n")
+	state := (lParam >> 30)
+	switch state {
+	case 0:
+		keyboardTable[wParam] = 1
+		fmt.Printf("[Event] -> WM_KEYDOWN -> %q %d\n", wParam, state)
+		switch wParam {
+		case VK_LCONTROL:
+			break
+		case VK_KEY_Q:
+			break
+		case VK_KEY_V:
+			if keyboardTable[VK_LCONTROL] == 1 {
+				s.out <- &SEvent{
+					Type: 2,
+					Spec: 1,
+				}
+			}
+			fmt.Println("[win32hook] -> CTRL+V")
+			break
+		case VK_KEY_C:
+			if keyboardTable[VK_KEY_Q] == 1 && keyboardTable[VK_LCONTROL] == 1 {
+				s.out <- &SEvent{
+					Type: 3,
+					Spec: 2,
+				}
+			} else if keyboardTable[VK_LCONTROL] == 1 {
+				s.out <- &SEvent{
+					Type: 1,
+					Spec: 1,
+					Buf:  "text",
+				}
+			}
+			fmt.Println("[win32hook] -> CTRL+C")
+			break
+		}
+		break
+	case 1:
+		//released
+		keyboardTable[wParam] = 0
+		break
+	}
+	return CallNextHookEx(keyboardHook, nCode, wParam, lParam)
+}
 func (s *SHook) LowLevelKeyboardProcCallback(nCode int, wParam WPARAM, lParam LPARAM) LRESULT {
+	//ret := CallNextHookEx(keyboardHook, nCode, wParam, lParam)
 	if nCode == HC_ACTION {
 		kbdstruct := (*KBDLLHOOKSTRUCT)(unsafe.Pointer(lParam))
 		code := byte(kbdstruct.vkCode)
@@ -346,10 +430,16 @@ func (s *SHook) LowLevelKeyboardProcCallback(nCode int, wParam WPARAM, lParam LP
 						Spec: 2,
 					}
 				} else if keyboardTable[VK_LCONTROL] == 1 {
+					//text, ok := GetClipboardText()
+					//if !ok {
+					//	break
+					//}
 					s.out <- &SEvent{
 						Type: 1,
 						Spec: 1,
+						Buf:  "text",
 					}
+
 				}
 				fmt.Println("[win32hook] -> CTRL+C")
 				break
@@ -368,6 +458,9 @@ func (s *SHook) hookStart() {
 	fmt.Printf("win32hook -> started\n")
 	keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL,
 		s.LowLevelKeyboardProcCallback, 0, 0)
+	//keyboardHook = SetWindowsHookEx(2,
+	//	s.KeyboardProcCallback, 0, 0)
+
 	var msg MSG
 	s.threadId = GetCurrentThreadId()
 	fmt.Printf("win32hook -> thread id: %d\n", s.threadId)
@@ -386,7 +479,7 @@ func (s *SHook) hookStart() {
 type SEvent struct {
 	Type int
 	Spec int
-	buf  string
+	Buf  string
 }
 type SHook struct {
 	out      chan *SEvent
@@ -408,4 +501,104 @@ func (s *SHook) Close() {
 	PostThreadMessage(DWORD(s.threadId), 0x0012, 0, 0)
 	<-s.start
 	fmt.Printf("[EventHook] -> closed thread\n")
+}
+
+func OpenClipBoard(hWndNewOwner HWND) bool {
+	ret1, ret2, err := procOpenClipboard.Call(
+		uintptr(hWndNewOwner),
+	)
+	if err != nil {
+		fmt.Printf("OpenClipBoard: \n\t%v\n\t%v\n\terr: %v\n", ret1, ret2, err)
+	}
+	return !(ret1 == 0)
+}
+func CloseClipboard() bool {
+	ret1, ret2, err := procCloseClipboard.Call()
+	if err != nil {
+		fmt.Printf("CloseClipboard: \n\t%v\n\t%v\n\terr: %v\n", ret1, ret2, err)
+	}
+	return !(ret1 == 0)
+}
+func GlobalUnlock(ptr HANDLE) bool {
+	ret1, ret2, err := procGlobalUnlock.Call(uintptr(ptr))
+	if err != nil {
+		fmt.Printf("GlobalUnlock: \n\t%v\n\t%v\n\terr: %v\n", ret1, ret2, err)
+	}
+	if ret1 == 0 {
+		return false
+	}
+	return true
+}
+func GlobalLock(ptr HANDLE) uintptr {
+	ret1, ret2, err := procGlobalLock.Call(
+		uintptr(ptr),
+	)
+	if err != nil {
+		fmt.Printf("GlobalLock: \n\t%v\n\t%v\n\terr: %v\n", ret1, ret2, err)
+	}
+	return uintptr(ret1)
+}
+func GetClipboardData(format UINT) HANDLE {
+	ret1, ret2, err := procGetClipboardData.Call(
+		uintptr(format),
+	)
+	if err != nil {
+		fmt.Printf("GetClipboardData: \n\t%v\n\t%v\n\terr: %v\n", ret1, ret2, err)
+	}
+	return HANDLE(ret1)
+}
+
+const (
+	CF_UNICODE_TEXT = 13
+	CF_TEXT         = 1
+	NULLPTR         = 0
+)
+
+// waitOpenClipboard opens the clipboard, waiting for up to a second to do so.
+func waitOpenClipboard() error {
+	started := time.Now()
+	limit := started.Add(time.Second)
+	var r uintptr
+	var err error
+	for time.Now().Before(limit) {
+		r, _, err = procOpenClipboard.Call(0)
+		if r != 0 {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return err
+}
+
+func GetClipboardText() (string, bool) {
+	fmt.Printf("reading clipboard -> ")
+	//ret := OpenClipBoard(0)
+	//if !ret {
+	//	fmt.Printf("Failed to open clipboard\n")
+	//	return "", false
+	//}
+
+	err := waitOpenClipboard()
+	if err != nil {
+		fmt.Printf("Failed to open clipboard\n")
+		return "", false
+	}
+	defer CloseClipboard()
+
+	hData := GetClipboardData(CF_UNICODE_TEXT)
+	if hData == NULLPTR {
+		fmt.Printf("failed to read clipboard\n")
+		return "", false
+	}
+	ptrData := GlobalLock(hData)
+	text := syscall.UTF16ToString((*[1 << 20]uint16)(unsafe.Pointer(ptrData))[:])
+	//fmt.Printf("TEXT: %s\n", text)
+
+	if !GlobalUnlock(hData) {
+		fmt.Printf("failed to read clipboard\n")
+		return "", false
+	}
+
+	fmt.Printf("Ok\n")
+	return text, true
 }

@@ -31,6 +31,7 @@ const (
 	SERVER_CLIPBOARD_PUSH = 10
 	SERVER_CONNECT_OK     = 11
 	SERVER_CLOSING        = 12
+	SERVER_PAIR_CLOSE     = 20
 
 	SERVER_RESPONSE_OK      = 13
 	SERVER_RESPONSE_BAD     = 14
@@ -48,27 +49,40 @@ type SThreadClientMessage struct {
 	Packet SNetworkPacketJson
 	debug  bool
 }
-type SPairTable struct {
-	ptr  *Client
-	uuid int
+type SPairRoom struct {
+	eventHistory     []string
+	clipboardHistory []string
+	id               int
+	//clients          map[*Client]int
+	creator *Client
+	child   *Client
+}
 
+type SPairTable struct {
+	ptr          *Client
+	uuid         int
+	starttime    int64
 	handCallback int
 }
-type Client struct {
-	conn         *websocket.Conn
-	router       *SocketRouter
-	rollPairUUID int
-	bucketTime   time.Time
-	send         chan *SThreadMessage
-	Auth         int
-	cookieUUID   int
 
+type Client struct {
+	conn          *websocket.Conn
+	router        *SocketRouter
+	rollPairUUID  int
+	bucketTime    time.Time
+	send          chan *SThreadMessage
+	Auth          int
+	cookieUUID    int
+	dead          bool
 	responseTable []int
 	pairTable     map[int]*SPairTable
 	//req          *http.Request //request object so we can read the cookie store, replace this when using the filesystem store
 	timeLost int64
 }
 
+func IsOk(c *Client) bool {
+	return c != nil && c.dead != true
+}
 func (this *Client) getResponse(uuid int) int {
 	//for i, v := range this.responseTable {
 	//	if v == uuid {
@@ -92,6 +106,8 @@ type SocketRouter struct {
 
 	// Unregister requests from clients.
 	unregister chan *Client
+
+	pairTable map[int]SPairRoom
 }
 
 func NewRouter() *SocketRouter {
@@ -100,6 +116,8 @@ func NewRouter() *SocketRouter {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+
+		pairTable: make(map[int]SPairRoom),
 		//lostClients: make(map[*Client]bool),
 		UUIDCounter: 1,
 	}
@@ -143,9 +161,11 @@ func (h *SocketRouter) run() int {
 					/* Experimental idea, if the client exists in the old table, return it to the caller */
 					v := r.Ptr.(int)
 					var c *Client
-					for _, x := range h.lostClients {
+					var i int
+					for ix, x := range h.lostClients {
 						if x.cookieUUID == v && (x.timeLost+(1000*60*10) > GetTimeUnixMilliseconds()) {
 							c = x
+							i = ix
 							break
 						}
 					}
@@ -154,6 +174,7 @@ func (h *SocketRouter) run() int {
 							Type: 1,
 							Ptr:  c,
 						}
+						h.lostClients = append(h.lostClients[:i], h.lostClients[i+1:]...)
 					} else {
 						r.ChanResponse <- &SThreadMessage{
 							Type: 1,
@@ -207,13 +228,13 @@ func (h *SocketRouter) run() int {
 					key := int(f)
 
 					var pair *SPairTable
-					var cl *Client
+					var creator *Client
 					ok = false
 					for i, v := range h.clients {
 						if i != r.Sender && v {
 							pair, ok = i.pairTable[key]
 							if ok {
-								cl = i
+								creator = i
 								break
 							}
 						}
@@ -223,8 +244,22 @@ func (h *SocketRouter) run() int {
 						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_ARG_INVALID)
 						break
 					}
-					pair.uuid = r.Sender.cookieUUID
-					pair.ptr = r.Sender
+					delete(creator.pairTable, key)
+					//pair.uuid = r.Sender.cookieUUID
+					//pair.ptr = r.Sender
+					//r.Sender.pairTable[key] = &SPairTable{
+					//	uuid: creator.cookieUUID,
+					//	ptr:  creator,
+					//}
+
+					if creator == r.Sender {
+						panic(0)
+						//lol
+					}
+					room := SPairRoom{}
+					room.creator = creator
+					room.child = r.Sender
+					h.pairTable[key] = room
 
 					SendPacket(r.Sender,
 						CreatePacketResponse(&r.Packet,
@@ -235,12 +270,12 @@ func (h *SocketRouter) run() int {
 								Key        int
 							}{
 								Response:   1,
-								ClientId:   cl.cookieUUID,
+								ClientId:   creator.cookieUUID,
 								ClientType: "windows",
 								Key:        key,
 							},
 						))
-					SendPacket(cl,
+					SendPacket(creator,
 						CreatePacketResponseEx(SERVER_RESPONSE_OK, pair.handCallback,
 							struct {
 								Response   int
@@ -259,8 +294,10 @@ func (h *SocketRouter) run() int {
 				case CLIENT_PAIR_ROLL:
 					fmt.Printf("CLIENT_PAIR_ROLL -> \n")
 					val := random(100000, 999999)
+					//roll new pair
 					r.Sender.pairTable[val] = &SPairTable{
 						uuid:         -1,
+						starttime:    GetTimeUnixMilliseconds(),
 						handCallback: r.Packet.Callback,
 					}
 					SendPacket(r.Sender, CreatePacketResponse(&r.Packet, struct {
@@ -291,12 +328,19 @@ func (h *SocketRouter) run() int {
 						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_BAD_TRANSPORT)
 						break
 					}
-					if f, ok = data["target"].(float64); !ok {
+					item.Spec = int(f)
+					if f, ok = data["Key"].(float64); !ok {
 						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_BAD_TRANSPORT)
 						break
 					}
-					item.Spec = int(f)
+					item.Key = int(f)
 
+					if item.Buffer, ok = data["Buffer"].(string); !ok {
+						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_BAD_TRANSPORT)
+						break
+					}
+
+					fmt.Printf("pair key -> %d\n", item.Key)
 					switch item.Type {
 					case 1:
 						fmt.Printf("[EVENT] -> PUSH -> CTRL+C\n")
@@ -311,18 +355,31 @@ func (h *SocketRouter) run() int {
 						}
 						break
 					}
-					SendPacket(r.Sender,
-						CreatePacketResponse(&r.Packet, struct {
-							Response int
-						}{
-							Response: 1,
-						}))
-					/*SendPacket(r.Sender, r.Sender,
-					CreatePacket(SERVER_CLIPBOARD_PUSH, struct {
-						Response int
-					}{
-						Response: 1,
-					}))*/
+					if pair, ok := h.pairTable[item.Key]; ok {
+						var to *Client
+						if r.Sender == pair.child {
+							to = pair.creator
+						} else {
+							to = pair.child
+						}
+						if !IsOk(to) {
+							break
+						}
+
+						SendPacket(to, CreatePacket(SERVER_CLIPBOARD_PUSH, item))
+						/*SNetworkClipboardItem{
+							Buffer: item.Buffer,
+							Type:   item.Type,
+						}))*/
+						SendPacket(r.Sender,
+							CreatePacketResponse(&r.Packet, struct {
+								Response int
+							}{
+								Response: 1,
+							}))
+					} else {
+						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_ARG_BAD_FORMAT)
+					}
 					break
 				}
 				break
@@ -583,22 +640,30 @@ func startClient(core *SocketRouter, w http.ResponseWriter, r *http.Request) int
 		log.Println(err)
 		return -1
 	}
-
-	/* overwrite client ptr to keep pointers */
-	client := &Client{
-		router:     core,
-		conn:       conn,
-		send:       make(chan *SThreadMessage, 256),
-		cookieUUID: core.UUIDCounter,
-		//pairTable:  make(map[int]*SPairTable),
-	}
+	var client *Client
 	/* This is all in-testing, expect it to break*/
 	if clientExists {
 		fmt.Printf("[upgrade] cloned old session\n")
+		//client = clientPtrs
+
+		//client.pairTable = make(map[int]*SPairTable)
+		client = clientPtr
 		client.pairTable = clientPtr.pairTable
+		client.router = core
+		client.conn = conn
+		client.send = make(chan *SThreadMessage, 256)
+		client.cookieUUID = core.UUIDCounter
+		client.dead = false
 	} else {
 		fmt.Printf("[upgrade] using new session\n")
-		client.pairTable = make(map[int]*SPairTable)
+		/* overwrite client ptr to keep pointers */
+		client = &Client{
+			router:     core,
+			conn:       conn,
+			send:       make(chan *SThreadMessage, 256),
+			cookieUUID: core.UUIDCounter,
+			pairTable:  make(map[int]*SPairTable),
+		}
 	}
 	client.router.register <- client //tell core pump about the new client request
 

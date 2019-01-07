@@ -18,6 +18,7 @@ import (
 type SNetworkClipboardItem struct {
 	Type   int
 	Spec   int
+	Key    int
 	Buffer string
 }
 
@@ -146,6 +147,7 @@ var s eventwindows.SHook
 var addr = flag.String("addr", "localhost:8080", "http service address")
 var flagPair = flag.String("pair", "", "key to pair to when program starts")
 var loopRun bool
+var pairKey int
 
 func main() {
 	flag.Parse()
@@ -249,10 +251,16 @@ func main() {
 						}
 						SendPacket(CreatePacketAction(CLIENT_PAIR_CONNECT, struct{ Key int }{Key: i},
 							func(Type int, data *map[string]interface{}) {
+								var ok bool
+								var f float64
 								fmt.Printf("Callback\n")
 								if Type < 0 {
 									return
 								}
+								if f, ok = (*data)["Key"].(float64); !ok {
+									return
+								}
+								pairKey = int(f)
 								fmt.Printf("%v\n", data)
 							}))
 					}
@@ -281,9 +289,21 @@ func main() {
 			}
 			break
 		case event := <-events:
+			text := ""
+			if event.Type == 1 {
+				eventwindows.GetClipboardText()
+				buf, ok := eventwindows.GetClipboardText()
+				if !ok {
+					break
+				}
+				text = buf
+			}
+			fmt.Printf("[text] -> %s\n", text)
 			SendPacket(CreatePacket(6, &SNetworkClipboardItem{
-				Type: event.Type,
-				Spec: event.Spec,
+				Type:   event.Type,
+				Spec:   event.Spec,
+				Buffer: text,
+				Key:    pairKey,
 			}))
 			break
 		case <-done:

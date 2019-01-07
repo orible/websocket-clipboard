@@ -48,8 +48,10 @@ type SNetworkPacketJson struct {
 type SNetworkClipboardItem struct {
 	Type   int
 	Spec   int
+	Key    int
 	Buffer string
 }
+
 type SNetworkGroup struct {
 	Data []interface{}
 }
