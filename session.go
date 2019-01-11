@@ -61,29 +61,34 @@ func HandlerMiddlewareSession(h http.Handler) http.Handler {
 		session, serr := gSessionStore.Get(r, "session-key")
 		if serr != nil {
 			fmt.Fprintf(l, "error] failed to read session storage!\n")
-			fmt.Fprintf(w, "failed to read session storage!\n")
 			http.Error(w, serr.Error(), http.StatusInternalServerError)
+			fmt.Fprintf(w, "failed to read session storage!\n")
+			fmt.Println("[session] Failed to read session storage\n", serr)
 			return
 		}
-
+		fmt.Printf("[session] Reading session store...")
 		qflagCreateNew := r.URL.Query().Get("session_cnew")
 		fmt.Fprintf(l, "OK]\n")
 		if session.IsNew {
 			fmt.Fprintf(l, "Created new session cookie\n")
-			fmt.Printf("New\n")
+			fmt.Printf("created new session\n")
 			session.Values[SESSION_REQUEST_COUNT] = 0
 			session.Values[SESSION_LAST_TIME] = GetTimeUnixMilliseconds()
 			session.Values[SESSION_UUID] = -1
+		} else {
+			fmt.Printf("session exists\n")
 		}
 
 		if qflagCreateNew == "true" && !session.IsNew {
 			fmt.Fprintf(l, "session_cnew: true\n\tdestroyed session\n")
 			session.Options.MaxAge = -1
 		}
+
 		rw := Ct_session(session)
 		session.Values[SESSION_REQUEST_COUNT] = rw.RequestCount() + 1
 		fmt.Fprintf(l, "Request count: [%d]\n", Ct_session(session).RequestCount())
-		fmt.Fprintf(l, "UUID count: [%d]\n", Ct_session(session).GetUUID())
+		fmt.Fprintf(l, "Socket UUID: [%d]\n", Ct_session(session).GetUUID())
+
 		/* Save cookie state, write buffer */
 		err := session.Save(r, w)
 		if err != nil {
@@ -101,11 +106,13 @@ func HandlerMiddlewareSession(h http.Handler) http.Handler {
 		}
 	})
 }
-func MiddlwareSessionInit() {
+func MiddlwareSessionInit(domain string, httpOnly bool) {
 	gSessionStore.Options = &sessions.Options{
-		Domain:   "localhost",
-		Path:     "/",
-		MaxAge:   3600 * 8, // 8 hours
-		HttpOnly: true,
+		Domain: domain,
+		//Domain: "localhost",
+		Path:   "/",
+		MaxAge: 3600 * 8, // 8 hours
+		//HttpOnly: true,
+		HttpOnly: false,
 	}
 }

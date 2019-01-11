@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -146,6 +147,8 @@ func PollActions() {
 var s eventwindows.SHook
 var addr = flag.String("addr", "localhost:8080", "http service address")
 var flagPair = flag.String("pair", "", "key to pair to when program starts")
+var flagInsecure = flag.Bool("https", true, "disable https security")
+
 var loopRun bool
 var pairKey int
 
@@ -153,17 +156,35 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 
+	//cer, err := tls.LoadX509KeyPair("server.crt", "server.key")
+	//if err != nil {
+	//	log.Println(err)
+	//	return
+	//}
+	//config := &tls.Config{Certificates: []tls.Certificate{cer}}
+
 	send = make(chan *SThreadMessage, 0xFF)
 	read = make(chan *SThreadMessage, 0xFF)
 
 	events := make(chan *eventwindows.SEvent, 0xFFFF)
 	interrupt := make(chan os.Signal, 1)
 
+	var wl eventwindows.WindowListener
+	wl.Start(events)
+
 	signal.Notify(interrupt, os.Interrupt)
-	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
+	u := url.URL{
+		Scheme: "wss",
+		Host:   *addr,
+		Path:   "/ws"}
 	log.Printf("connecting to %s", u.String())
 
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	var ws websocket.Dialer
+	ws.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: *flagInsecure,
+	}
+	c, _, err := ws.Dial(u.String(), nil)
+	//websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		log.Fatal("dial:", err)
 	}
@@ -214,7 +235,7 @@ func main() {
 				r := msg.Ptr.(*SNetworkPacketJson)
 				w, err := c.NextWriter(websocket.TextMessage)
 				if err != nil {
-					fmt.Printf("%v\n", err)
+					fmt.Printf("failed to get writer %v\n", err)
 					return
 				}
 				data, err := json.Marshal(r)
@@ -223,6 +244,8 @@ func main() {
 					fmt.Printf("%v\n", err)
 					return
 				}
+				send := len(data)
+				fmt.Printf("Sending: %d bytes\n", send)
 				w.Write(data)
 				if err := w.Close(); err != nil {
 					fmt.Printf("%v\n", err)
@@ -261,7 +284,7 @@ func main() {
 									return
 								}
 								pairKey = int(f)
-								fmt.Printf("%v\n", data)
+								fmt.Printf("pair response: %v\n", data)
 							}))
 					}
 					break
@@ -289,25 +312,28 @@ func main() {
 			}
 			break
 		case event := <-events:
-			text := ""
-			if event.Type == 1 {
+			/*text := ""
+			if event.Type == -1 {
 				eventwindows.GetClipboardText()
 				buf, ok := eventwindows.GetClipboardText()
 				if !ok {
 					break
 				}
 				text = buf
+			}*/
+			if event.Type == 10 {
+				fmt.Printf("[text] -> [%s]\n", event.Buf)
+				SendPacket(CreatePacket(6, &SNetworkClipboardItem{
+					Type:   event.Type,
+					Spec:   event.Spec,
+					Buffer: event.Buf,
+					Key:    pairKey,
+				}))
 			}
-			fmt.Printf("[text] -> %s\n", text)
-			SendPacket(CreatePacket(6, &SNetworkClipboardItem{
-				Type:   event.Type,
-				Spec:   event.Spec,
-				Buffer: text,
-				Key:    pairKey,
-			}))
 			break
 		case <-done:
-			return
+			loopRun = false
+			break
 		case t := <-ticker.C:
 			t.Hour()
 			PollActions()
@@ -333,5 +359,6 @@ func main() {
 	}
 	fmt.Printf("network closed, unloading system hooks\n")
 	s.Close()
+	wl.Stop()
 	fmt.Printf("Shutdown\nGoodbye :)\n")
 }

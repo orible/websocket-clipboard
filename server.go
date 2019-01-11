@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -115,10 +116,10 @@ func templateBuild() bool {
 	}
 	//Generate our templates map from our layouts/ and includes/ directories
 	for _, layout := range layouts {
-		fmt.Printf("Layout: %s\n", layouts)
+		fmt.Printf("[template] Layout: %s\n", layouts)
 		files := append(includes, layout)
 		gTemplates[filepath.Base(layout)] = template.Must(template.ParseFiles(files...))
-		fmt.Printf("Built: %s\n", filepath.Base(layout))
+		fmt.Printf("[template] Built: %s\n", filepath.Base(layout))
 	}
 	return true
 }
@@ -127,10 +128,17 @@ func responseRequestHandler(w http.ResponseWriter, r *http.Request) {}
 func responseRequestDebug(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("<p></p>"))
 }
+
+type SPageInfo struct {
+	PageTitle string
+	NavTitle  string
+	Theme     string
+}
+
 func responseRequestIndex(w http.ResponseWriter, r *http.Request) {
 	//w.Write([]byte("<p></p>"))
-	cookie1 := &http.Cookie{Name: "sample", Value: "sample", HttpOnly: false}
-	http.SetCookie(w, cookie1)
+	//cookie1 := &http.Cookie{Name: "sample", Value: "sample", HttpOnly: false}
+	//http.SetCookie(w, cookie1)
 
 	queryReload := r.URL.Query().Get("reload")
 	if queryReload == "true" {
@@ -139,32 +147,57 @@ func responseRequestIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpl, ok := gTemplates["index.html"]
 	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	tmpl.Execute(w, nil)
+	var info SPageInfo
+	info.PageTitle = "go-clipboard"
+	info.NavTitle = "go-clipboard"
+	err := tmpl.Execute(w, &info)
+	if err != nil {
+		fmt.Print("responseRequestIndex -> failed to generate page\n", err)
+	}
 }
 
 var flagAddr = flag.String("addr", "localhost:8080", "http service address")
 var flagPairTimeout = flag.Int("ptimeout", 0, "default pair timeout")
+var flagCert = flag.String("cert", "server", "certificate dir and name")
+
+var flagInsecure = flag.Bool("https", true, "disable https security")
+var flagCookieDomain = flag.String("cookiedomain", "localhost", "session cookie domain")
+
+//var flagCookie flag.String("cookiehttp")
 
 func main() {
-	fmt.Printf("server started\n")
+	fmt.Printf("[init] go-websocket 0.1\n[init] server starting...\n")
 	flag.Parse()
 
+	fmt.Printf("[template] building templates\n")
 	templateBuild()
-	MiddlwareSessionInit()
 
-	fmt.Printf("Starting router\n")
+	if *flagCookieDomain != "localhost" {
+		fmt.Printf("[init] cookie domain: %s\n", *flagCookieDomain)
+	}
+
+	slice := *flagAddr
+	MiddlwareSessionInit(slice[:strings.IndexByte(slice, ':')], false)
+
+	fmt.Printf("[init] Certificate dir: %s\n", *flagCert)
+	fmt.Printf("[init] Starting router\n")
 	hub := NewRouter()
 	go hub.run()
 
-	fmt.Printf("Init HTTP server\n")
+	fmt.Printf("[init] Init HTTP server\n")
 	rmux := mux.NewRouter()
 	subrouter := rmux.PathPrefix("/").Subrouter()
 	rmux.PathPrefix("/asset/").Handler(
 		http.StripPrefix("/asset/",
 			http.FileServer(http.Dir("public/web/"))))
+
+	//fix for serviceworker origin and scope
+	rmux.PathPrefix("/").Handler(
+		http.FileServer(http.Dir("public/web/chrome")))
+
 	subrouter.HandleFunc("/api", responseRequestHandler).Methods("POST")
 	subrouter.HandleFunc("/webtest", responseRequestIndex).Methods("GET")
 	subrouter.HandleFunc("/debug", responseRequestDebug).Methods("GET")
@@ -173,7 +206,7 @@ func main() {
 	})
 	subrouter.Use(HandlerMiddlewareSession)
 
-	fmt.Printf("Starting HTTP server on %s\n", *flagAddr)
+	fmt.Printf("[init] Starting HTTP server on %s\n", *flagAddr)
 	srv := &http.Server{
 		Handler: rmux,
 		Addr:    *flagAddr,
@@ -183,13 +216,19 @@ func main() {
 	}
 	//go router()
 	go func() {
-		if err := srv.ListenAndServe(); err != nil {
-			log.Println(err)
+		if *flagInsecure == true {
+			if err := srv.ListenAndServeTLS(*flagCert+".crt", *flagCert+".key"); err != nil {
+				log.Println(err)
+			}
+		} else {
+			if err := srv.ListenAndServe(); err != nil {
+				log.Println(err)
+			}
 		}
 	}()
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
 	<-c
-	fmt.Printf("Server stopped\n")
-	fmt.Printf("Server shutdown\n")
+	fmt.Printf("[init] Server stopped\n")
+	fmt.Printf("[init] Server shutdown\n")
 }

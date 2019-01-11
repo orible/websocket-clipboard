@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/ring"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,7 @@ const (
 	pongWait                = 60 * time.Second
 	SOCKET_WRITE_WAIT       = 10 * time.Second
 	SOCKET_PING_PERIOD      = (pongWait * 9) / 10
-	SOCKET_MAX_MESSAGE_SIZE = 1024
+	SOCKET_MAX_MESSAGE_SIZE = 2048
 
 	PROTOCOL_BAD          = 0
 	PROTOCOL_OK           = 1
@@ -27,6 +28,9 @@ const (
 	CLIENT_PAIR_ROLL      = 4
 	CLIENT_PAIR_CONNECT   = 5
 	CLIENT_PUSH_CLIPBOARD = 6
+	FLAG_MULTIPLEX_BUFFER = 0x1
+
+	SERVER_BUFFER_PART = 12
 
 	SERVER_CLIPBOARD_PUSH = 10
 	SERVER_CONNECT_OK     = 11
@@ -51,7 +55,7 @@ type SThreadClientMessage struct {
 }
 type SPairRoom struct {
 	eventHistory     []string
-	clipboardHistory []string
+	clipboardHistory ring.Ring
 	id               int
 	//clients          map[*Client]int
 	creator *Client
@@ -78,6 +82,16 @@ type Client struct {
 	pairTable     map[int]*SPairTable
 	//req          *http.Request //request object so we can read the cookie store, replace this when using the filesystem store
 	timeLost int64
+}
+
+func deleteClient(s *Client) {
+	for i, v := range s.pairTable {
+		/* close pair requests */
+		if !s.dead {
+			SendPacket(s, CreatePacketResponseEx(SERVER_RESPONSE_BAD, v.handCallback, nil))
+		}
+		delete(s.pairTable, i)
+	}
 }
 
 func IsOk(c *Client) bool {
@@ -139,15 +153,17 @@ func (h *SocketRouter) run() int {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			fmt.Printf("Router -> client connected\n")
+			fmt.Printf("[Router] -> client connected\n")
 			break
 		case client := <-h.unregister:
-			fmt.Printf("Router -> client disconnected\n")
+			fmt.Printf("[Router] -> client disconnected\n")
 			delete(h.clients, client)
 			close(client.send)
 
 			client.timeLost = GetTimeUnixMilliseconds()
 			//store in lost clients, with timeout
+
+			fmt.Printf("[Router] -> client sleeping\n")
 			h.lostClients = append(h.lostClients, client)
 
 			//delete client, eg, when socket lost
@@ -192,6 +208,11 @@ func (h *SocketRouter) run() int {
 					continue /* drop */
 				}
 				switch r.Packet.Type {
+				//case CLIENT_OPEN_MULTIPLEX_BUFFER:
+				/* TODO: Open multiplexed buffer stream, referenced by callback ID */
+				/* Remarks: Actually, no this is a bad idea */
+				/* Do a typical packet protocol */
+				//	break
 				case CLIENT_CONNECT:
 					fmt.Printf("CLIENT_CONNECT -> \n")
 					r.Sender.Auth = 1
@@ -339,7 +360,6 @@ func (h *SocketRouter) run() int {
 						SendPacketResponseFault(r.Sender, &r.Packet, RESPONSE_BAD_TRANSPORT)
 						break
 					}
-
 					fmt.Printf("pair key -> %d\n", item.Key)
 					switch item.Type {
 					case 1:
@@ -393,6 +413,17 @@ func (h *SocketRouter) run() int {
 			}
 			break
 		case <-ticker.C:
+			for i, v := range h.lostClients {
+				if ((v.timeLost + 1000) * 60) < GetTimeUnixMilliseconds() {
+					fmt.Printf("[router] deleting expired client\n")
+					/* expired */
+					deleteClient(v)
+					v = nil
+
+					//delete it
+					h.lostClients = append(h.lostClients[:i], h.lostClients[i+1:]...)
+				}
+			}
 			break
 		}
 
@@ -401,7 +432,7 @@ func (h *SocketRouter) run() int {
 }
 
 func (c *Client) readThread() {
-	fmt.Printf("[Client] ReadPump starting\n")
+	fmt.Printf("[client] socket read thread starting\n")
 	defer func() {
 		c.router.unregister <- c
 		c.conn.Close()
@@ -413,17 +444,17 @@ func (c *Client) readThread() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("[client] error: %v", err)
 			}
 			break
 		}
-		fmt.Printf("[READ] Message!\n")
+		fmt.Printf("[client] read message\n")
 		var msg SThreadClientMessage
 		msg.Sender = c
 		decode := json.Unmarshal(message, &msg.Packet)
 
 		if decode != nil {
-			log.Printf("Failed to decode message: %v", err)
+			log.Printf("[client] failed to decode message: %v", err)
 			return
 		}
 		c.router.broadcast <- &SThreadMessage{
@@ -507,6 +538,7 @@ func SendPacketEx(from *Client, to *Client, msg *SNetworkPacketJson) bool {
 }
 
 func (c *Client) writeThread() {
+	fmt.Printf("[client] socket write thread starting\n")
 	ticker := time.NewTicker(SOCKET_PING_PERIOD)
 	defer func() {
 		ticker.Stop()
@@ -515,15 +547,16 @@ func (c *Client) writeThread() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			fmt.Printf("[WRITE] Message!\n")
+			fmt.Printf("[client] write message\n")
 			c.conn.SetWriteDeadline(time.Now().Add(SOCKET_WRITE_WAIT))
 			if !ok {
-				fmt.Printf("Failed to read message\n")
+				fmt.Printf("[client] failed set write deadline\n")
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
+				fmt.Printf("[client] failed to get next writer\n")
 				return
 			}
 			var packet SNetworkGroup
@@ -538,11 +571,12 @@ func (c *Client) writeThread() {
 			}
 			data, err := json.Marshal(packet)
 			if err != nil {
-				fmt.Printf("Failed to marshal output\n")
+				fmt.Printf("[client] write -> failed to marshal output\n")
 				return
 			}
 			w.Write(data)
 			if err := w.Close(); err != nil {
+				fmt.Printf("[client] failed to close writer\n")
 				return
 			}
 
@@ -592,7 +626,7 @@ func startClient(core *SocketRouter, w http.ResponseWriter, r *http.Request) int
 	fmt.Printf("[upgrade] -> start client\n")
 	notifier, ok := w.(http.CloseNotifier)
 	if !ok {
-		panic("Expected http.ResponseWriter to be an http.CloseNotifier")
+		panic("[upgrade] Expected http.ResponseWriter to be an http.CloseNotifier")
 	}
 
 	session, ok := r.Context().Value("sessionstore").(*sessions.Session)
@@ -623,18 +657,18 @@ func startClient(core *SocketRouter, w http.ResponseWriter, r *http.Request) int
 	if clientExists {
 		session.Values[SESSION_UUID] = clientPtr.cookieUUID
 		if err := session.Save(r, w); err != nil {
-			fmt.Printf("save error: %s\n", err)
+			fmt.Printf("[upgrade] session write failed to save: %s\n", err)
 			log.Fatal(err)
 		}
 	} else {
 		core.UUIDCounter++
 		session.Values[SESSION_UUID] = core.UUIDCounter
 		if err := session.Save(r, w); err != nil {
-			fmt.Printf("save error: %s\n", err)
+			fmt.Printf("[upgrade] session write failed to save: %s\n", err)
 			log.Fatal(err)
 		}
 	}
-	fmt.Printf("ID: %s\n", session.ID)
+	fmt.Printf("[upgrade] ID: %s\n", session.ID)
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
@@ -652,7 +686,7 @@ func startClient(core *SocketRouter, w http.ResponseWriter, r *http.Request) int
 		client.router = core
 		client.conn = conn
 		client.send = make(chan *SThreadMessage, 256)
-		client.cookieUUID = core.UUIDCounter
+		//client.cookieUUID = core.UUIDCounter
 		client.dead = false
 	} else {
 		fmt.Printf("[upgrade] using new session\n")
@@ -669,5 +703,7 @@ func startClient(core *SocketRouter, w http.ResponseWriter, r *http.Request) int
 
 	go client.writeThread()
 	go client.readThread()
+	fmt.Printf("[upgrade] client started\n")
+
 	return 0
 }

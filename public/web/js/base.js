@@ -28,13 +28,13 @@ const NetLibCore = (function () {
             socket.send(message);
             return 0;
         }
-        function createCallbackEx(type, cb, timeout, flag, id) {
+        function createCallbackEx(type, cb, timeout, flag, id, data) {
             console.log("createCallbackEx -> timeout", timeout);
-            actions.push({ Type: type, Id: id, cb: cb, time: Date.now(), timeout: timeout, flag: flag })
+            actions.push({ Type: type, Id: id, cb: cb, time: Date.now(), timeout: timeout, flag: flag, data: data})
         }
         function createCallback(type, cb, timeout, flag) {
             uuid++;
-            actions.push({ Type: type, Id: uuid, cb: cb, time: Date.now(), timeout: timeout, flag: flag })
+            actions.push({ Type: type, Id: uuid, cb: cb, time: Date.now(), timeout: timeout, flag: flag, data: null, })
             return uuid;
         }
         function _SendAction(Type, Object, cb) {
@@ -58,14 +58,23 @@ const NetLibCore = (function () {
                 return
             _Send(CLIENT_CONNECT, {});
         }
+        function appendLog(item) {
+            let target = document.getElementById("log");
+            var doScroll = target.scrollTop > (target.scrollHeight - target.clientHeight - 1);
+            target.appendChild(item);
+            if (doScroll) {
+                target.scrollTop = target.scrollHeight - target.clientHeight;
+            }
+        }
         function _onMessage(evt) {
             var json = JSON.parse(evt.data);
             messages++;
             for (var i = 0; i < json.Data.length; i++) {
                 msg = json.Data[i];
                 let time = Date.now() - msg.Time;
-                if (time < 0)
-                    alert("bad clock!");
+                time = Math.abs(time);
+                //if (time < 0)
+                //    alert("bad clock!");
                 console.log("Time: %f\n", time / 1000);
                 let data = msg.Transport;
                 switch (msg.Type) {
@@ -75,6 +84,7 @@ const NetLibCore = (function () {
                             data.Users,
                             data.Version,
                         );
+                        ModuleNotification.Send("Connected", data.Version)
                         break
                     case SERVER_CLOSING:
                         serverClosing = true
@@ -82,21 +92,25 @@ const NetLibCore = (function () {
                     case SERVER_CLIPBOARD_PUSH:
                         console.log("Clipboard: %s\n", data.Buffer);
                         let x= document.createElement("p");
-                        x.setAttribute("class", "_test");
-                        x.textContent = data.Buffer;
-                        log.appendChild(x);
+                        x.setAttribute("class", "text formatted");
+                        let i = document.createElement("pre");
+                        i.textContent = data.Buffer;
+                        x.appendChild(i);
+                        appendLog(x);
+                        ModuleNotification.Send("Clipboard: text", data.Buffer);
                     break
                     default:
                         if (msg.Type != SERVER_RESPONSE_BAD && msg.Type != SERVER_RESPONSE_OK) {
                             break
                         }
                         let codeName = ((msg.Type == SERVER_RESPONSE_OK) ? "OK": "BAD")
+                        let header = (msg.Type == SERVER_RESPONSE_OK) ? 1 : 0;
                         for (let i = 0; i < actions.length; i++) {
                             let a = actions[i];
                             if (a.Id == msg.Callback) {
                                 let time = Date.now() - a.time;
                                 console.log("Server -> Response [%s] [%d] [%d]ms\n", codeName, a.Type, time, time/1000);
-                                let ret = a.cb({ type: a.Type, id: a.Id, data: data });
+                                let ret = a.cb({ type: header, header: msg.Type, id: a.Id, data: data, cbdata: a.data });
                                 if (ret != -1) {
                                     actions.splice(i, 1);
                                 }
@@ -111,7 +125,10 @@ const NetLibCore = (function () {
             if (serverClosing) {
 
             } else {
-                alert("server closed without close flag");
+                ModuleNotification.Send(
+                    "Connection closed.", 
+                    "server closed without close message, crash?"
+                    );
             }
         }
         function _Tick() {
@@ -123,7 +140,8 @@ const NetLibCore = (function () {
                         {
                             type: -1,
                             id: a.Id,
-                            data: null
+                            data: null,
+                            cbdata: a.data,
                         })
                     actions.splice(i, 1);
                 }
@@ -131,8 +149,8 @@ const NetLibCore = (function () {
             setTimeout(_Tick, 1000);
         }
         return {
-            CreateExpectantCallback: function (type, id, cbf, timeout) {
-                return createCallbackEx(type, cbf, timeout, 0x1, id);
+            CreateExpectantCallback: function (type, id, cbf, timeout, data) {
+                return createCallbackEx(type, cbf, timeout, 0x1, id, data);
             },
             ConnectPair: function (key, cb) {
                 _SendAction(CLIENT_PAIR_CONNECT, {
@@ -146,7 +164,8 @@ const NetLibCore = (function () {
                 _Send(type, object);
             },
             Connect: function () {
-                socket = new WebSocket("ws://" + document.location.host + "/ws");
+                var secure = (location.protocol === 'https:') ? 1: 0;
+                socket = new WebSocket("wss://" + document.location.host + "/ws");
                 socket.addEventListener('message', _onMessage.bind(this));
                 socket.addEventListener('close', _onClose.bind(this));
                 socket.addEventListener('open', _onOpen.bind(this));
@@ -157,7 +176,9 @@ const NetLibCore = (function () {
     window.onload = function () {
         connection.Connect();
         test = connection;
-
+        
+        ModuleNotification.RequestPermission();
+        //ModuleNotification.Send("test");
 
         btnRollPair.onclick = function (e) {
             connection.NewPair(function (e) {
@@ -169,9 +190,13 @@ const NetLibCore = (function () {
                 viewRollPairBox.value = e.data.Key;
                 connection.CreateExpectantCallback(0, e.id, function (e) {
                     console.log("client connected -> ", e);
+                    ModuleNotification.Send("Remote client connected to room\n", "Remote client connected to room: " + e.cbdata.key);
+                    $('#modalConnection').modal('hide');
+                    $('.navbar-toggler').click();
                     return true;
-                }, e.data.Timeout);
-                return false;
+                }, e.data.Timeout, {key: parseInt(e.data.Key)});
+                ModuleNotification.Send("Created room: " + parseInt(e.data.Key), "Created pair for: "  + parseInt(e.data.Key));
+                return true;
             });
         }
         btnConnectPair.onclick = function (e) {
